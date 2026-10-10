@@ -210,7 +210,7 @@ const clamp=(v,a,b)=>v<a?a:v>b?b:v;
 const mk=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c};
 const PW=720,PH=900;
 
-const DEFAULTS={zoom:1,px:.5,py:.5,dust:.35,noise:.45,cast:.7,levels:.9,bright:0,contrast:.25,sat:1,warm:0,bw:false,sharp:.8,bg:true,tol:.4,feather:.5,gray:.86,out:1620,fmt:'png'};
+const DEFAULTS={zoom:1,px:.5,py:.5,dust:.35,noise:.45,cast:.7,levels:.9,bright:0,contrast:.25,sat:1,warm:0,bw:false,sharp:.8,bg:false,tol:.4,feather:.5,gray:.8,out:1620,fmt:'png'};
 const P=Object.assign({},DEFAULTS);
 const PRESETS={
   'Gentle':{dust:.15,noise:.3,cast:.4,levels:.6,bright:0,contrast:.1,sat:1,warm:0,sharp:.6},
@@ -240,7 +240,7 @@ const GROUPS=[
     {id:'tol',label:'Backdrop match',min:0,max:1,step:.01,fmt:pct},
     {id:'feather',label:'Edge softness',min:0,max:1,step:.01,fmt:pct},
     {id:'gray',label:'Gray tone',min:.5,max:.95,step:.01,fmt:pct}],
-    note:'Works best when the original background is plain. Turn it off if the edges look wrong.'}
+    note:'Off by default. Works best when the original background is plain and clearly different from hair and clothes. Lower Backdrop match if it eats into the person.'}
 ];
 
 /* ---------- controls ---------- */
@@ -469,7 +469,7 @@ function blurPlane(p,w,h,r,it){
   return a;
 }
 function bgMask(c){
-  const gw=200,gh=250,s=mk(gw,gh),sx=s.getContext('2d',{willReadFrequently:true});
+  const gw=240,gh=300,s=mk(gw,gh),sx=s.getContext('2d',{willReadFrequently:true});
   sx.imageSmoothingQuality='high';sx.drawImage(c,0,0,gw,gh);
   const d=sx.getImageData(0,0,gw,gh).data,N=gw*gh;
   const rs=[],gs=[],bs=[];
@@ -478,16 +478,29 @@ function bgMask(c){
   for(let y=2;y<gh-2;y++){pushPx(0,y);pushPx(1,y);pushPx(gw-1,y);pushPx(gw-2,y)}
   const med=a=>{a.sort((p,q)=>p-q);return a[a.length>>1]};
   const mr=med(rs),mg=med(gs),mb=med(bs);
-  const dd=new Float32Array(N);
-  for(let p=0;p<N;p++)dd[p]=(Math.abs(d[p*4]-mr)+Math.abs(d[p*4+1]-mg)+Math.abs(d[p*4+2]-mb))/3;
-  const thr=6+P.tol*60,vis=new Uint8Array(N),q=new Int32Array(N);let qh=0,qt=0;
-  const seed=p=>{if(!vis[p]&&dd[p]<=thr){vis[p]=1;q[qt++]=p}};
-  for(let x=0;x<gw;x++){seed(x);seed((gh-1)*gw+x)}
-  for(let y=0;y<gh;y++){seed(y*gw);seed(y*gw+gw-1)}
-  while(qh<qt){
-    const p=q[qh++],x=p%gw,y=(p/gw)|0;
-    const tryN=n=>{if(vis[n])return;const dp=Math.abs(dd[n]-dd[p]);if(dd[n]<=thr||(dp<4&&dd[n]<=thr*1.8)){vis[n]=1;q[qt++]=n}};
-    if(x>0)tryN(p-1);if(x<gw-1)tryN(p+1);if(y>0)tryN(p-gw);if(y<gh-1)tryN(p+gw);
+  const dd=new Float32Array(N),G=new Float32Array(N);
+  for(let p=0;p<N;p++){
+    const r=d[p*4],g=d[p*4+1],b=d[p*4+2];
+    dd[p]=(Math.abs(r-mr)+Math.abs(g-mg)+Math.abs(b-mb))/3;
+    G[p]=r*.299+g*.587+b*.114;
+  }
+  /* Region growing from the picture edges. A pixel joins the backdrop only if it is
+     close to the border colour AND is not across a visible edge from its neighbour.
+     If the fill swallows most of the picture (hair, dark clothes), it retries stricter. */
+  let thr=8+P.tol*45,step=1.5+P.tol*4,vis=new Uint8Array(N);
+  const q=new Int32Array(N);
+  for(let attempt=0;attempt<5;attempt++){
+    vis=new Uint8Array(N);let qh=0,qt=0;
+    const seed=p=>{if(!vis[p]&&dd[p]<=thr){vis[p]=1;q[qt++]=p}};
+    for(let x=0;x<gw;x++){seed(x);seed((gh-1)*gw+x)}
+    for(let y=0;y<gh;y++){seed(y*gw);seed(y*gw+gw-1)}
+    const tryN=(n,p)=>{if(!vis[n]&&dd[n]<=thr&&Math.abs(G[n]-G[p])<=step){vis[n]=1;q[qt++]=n}};
+    while(qh<qt){
+      const p=q[qh++],x=p%gw,y=(p/gw)|0;
+      if(x>0)tryN(p-1,p);if(x<gw-1)tryN(p+1,p);if(y>0)tryN(p-gw,p);if(y<gh-1)tryN(p+gw,p);
+    }
+    if(qt/N<=.55)break;
+    thr*=.65;step*=.75;
   }
   const m0=new Float32Array(N);for(let p=0;p<N;p++)m0[p]=vis[p];
   const m=blurPlane(m0,gw,gh,1+Math.round(P.feather*3),2);
